@@ -17,6 +17,8 @@ CGINCLUDE
 
 #define MAX_MARCH_SINGLE_GBUFFER_PASS 100
 
+#define USE_FRUSTUM_CORNERS 1
+
 int g_scene;
 int g_hdr;
 int g_enable_adaptive;
@@ -97,14 +99,38 @@ struct vs_out
 {
     float4 vertex : SV_POSITION;
     float4 spos : TEXCOORD0;
+    #if USE_FRUSTUM_CORNERS
+    float4 interpolatedRay : TEXCOORD1;
+    #endif
 };
 
+#if USE_FRUSTUM_CORNERS
+
+uniform float4x4 _FrustumCorners;
+#if UNITY_SINGLE_PASS_STEREO
+uniform float4x4 _FrustumCorners2;
+#endif
+
+#endif
 
 vs_out vert(ia_out v)
 {
     vs_out o;
     o.vertex = v.vertex;
     o.spos = o.vertex;
+
+#if USE_FRUSTUM_CORNERS
+    float2 quadVertex = (v.vertex.xy + 1.0) / 2.0;
+    int frustumIndex = quadVertex.x + 2 * (1 - quadVertex.y);
+    #if UNITY_SINGLE_PASS_STEREO
+      if (unity_StereoEyeIndex == 0)
+        o.interpolatedRay = _FrustumCorners[frustumIndex];
+      else
+        o.interpolatedRay = _FrustumCorners2[frustumIndex];
+    #else
+      o.interpolatedRay = _FrustumCorners[frustumIndex];
+    #endif
+#endif
     return o;
 }
 
@@ -142,6 +168,24 @@ void raymarching(float2 pos, const int num_steps, inout float o_total_distance, 
 }
 
 
+void raymarchingFrustum(float3 ray_dir, const int num_steps, inout float o_total_distance, out float o_num_steps, out float o_last_distance, out float3 o_raypos)
+{
+    float3 cam_pos      = get_camera_position();
+    float max_distance = _ProjectionParams.z - _ProjectionParams.y;
+    o_raypos = cam_pos + ray_dir * o_total_distance;
+
+    o_num_steps = 0.0;
+    o_last_distance = 0.0;
+    for(int i=0; i<num_steps; ++i) {
+        o_last_distance = map(o_raypos);
+        o_total_distance += o_last_distance;
+        o_raypos += ray_dir * o_last_distance;
+        o_num_steps += 1.0;
+        if(o_last_distance < 0.001 || o_total_distance > max_distance) { break; }
+    }
+    o_total_distance = min(o_total_distance, max_distance);
+    //if(o_total_distance > max_distance) { discard; }
+}
 
 struct gbuffer_out
 {
@@ -181,7 +225,12 @@ gbuffer_out frag_gbuffer(vs_out v)
         //normal = float3(0.0, 0.0, 1.0);
     }
     else {
+#if USE_FRUSTUM_CORNERS
+        float3 ray_dir = normalize(v.interpolatedRay);
+        raymarchingFrustum(ray_dir, MAX_MARCH_SINGLE_GBUFFER_PASS, total_distance, num_steps, last_distance, ray_pos);
+#else
         raymarching(pos, MAX_MARCH_SINGLE_GBUFFER_PASS, total_distance, num_steps, last_distance, ray_pos);
+#endif
         normal = guess_normal(ray_pos);
     }
 
